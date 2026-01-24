@@ -1,0 +1,559 @@
+---
+title: 'Additive Model - Block 1 Flexibility Simulations'
+subtitle: 'Variation of p(L), p(I), and correlation'
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+  word_document: default
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+## Introduction
+
+This script runs Block 1 flexibility simulations for the Additive Model,
+systematically varying three parameters:
+- p(L): Probability of latent disorder (0.5, 0.65, 0.8)
+- p(I): Probability of inflammation (0.1, 0.3, 0.5)
+- c: Correlation between L and I (0.1, 0.3, 0.5)
+
+This creates 3 × 3 × 3 = 27 scenarios. For each scenario, we run 1000
+simulations and calculate heterogeneity indices (Shannon index and Hill
+numbers q=0, q=1, q=2) for both inflammation groups.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## Set-up
+
+```{r library, echo=TRUE, message=FALSE, warning=FALSE}
+# Load required packages
+library(tidyverse)
+library(mvtnorm)
+library(MASS)
+library(knitr)
+library(flextable)
+library(officer)
+```
+
+```{r general_setup, echo=TRUE}
+# Setting seed for reproducibility
+set.seed(123)
+
+# Combinations of binary criteria
+combinations <- expand.grid(c(0,1), c(0,1), c(0,1), c(0,1), c(0,1))
+```
+
+## Helper Functions
+
+```{r helper_functions, echo=TRUE}
+# Function to ensure the values fall between 0 and 4
+rescale <- function(x) {
+  min_val <- min(x)
+  max_val <- max(x)
+  return((x - min_val) / (max_val - min_val) * 4)
+}
+
+# Function to generate correlated binary variables
+generate_correlated_binary <- function(n, p1, p2, cor) {
+  means <- c(0, 0)
+  sigma <- matrix(c(1, cor, cor, 1), 2, 2)
+  bvn <- mvrnorm(n, mu = means, Sigma = sigma)
+  
+  threshold_L <- qnorm(1 - p1)
+  threshold_I <- qnorm(1 - p2)
+  
+  L <- ifelse(bvn[,1] > threshold_L, 1, 0)
+  I <- ifelse(bvn[,2] > threshold_I, 1, 0)
+  
+  return(data.frame(L = L, I = I))
+}
+
+# Function to calculate Shannon index
+calculate_shannon <- function(probabilities) {
+  p <- probabilities[probabilities > 0]
+  p <- p / sum(p)
+  H <- -sum(p * log(p))
+  return(H)
+}
+
+# Function to calculate Hill numbers
+calculate_hill <- function(probabilities, q) {
+  p <- probabilities[probabilities > 0]
+  p <- p / sum(p)
+  
+  if (q == 1) {
+    # Limit case: exponential of Shannon entropy
+    return(exp(-sum(p * log(p))))
+  } else {
+    # General formula: Hill = (sum(p^q))^(1/(1-q))
+    return(sum(p^q)^(1/(1-q)))
+  }
+}
+```
+
+## Simulation Parameters
+
+```{r parameters, echo=TRUE}
+# Number of individuals per simulation
+n <- 10000
+
+# Number of simulations per scenario
+n_sims <- 100
+
+# Parameter grid for Block 1
+p_L_values <- c(0.5, 0.65, 0.8)
+p_I_values <- c(0.1, 0.3, 0.5)
+cor_values <- c(0.1, 0.3, 0.5)
+
+# Create full parameter grid
+parameter_grid <- expand.grid(
+  p_L = p_L_values,
+  p_I = p_I_values,
+  cor = cor_values
+)
+
+cat("Total number of scenarios:", nrow(parameter_grid), "\n")
+cat("Simulations per scenario:", n_sims, "\n")
+cat("Total simulations:", nrow(parameter_grid) * n_sims, "\n")
+```
+
+## Results Storage
+
+```{r results_setup, echo=TRUE}
+# Create results dataframe with RAW NUMERIC values (not formatted strings)
+# This allows flexible formatting later for different table types
+
+results_block1 <- data.frame(
+  # Parameters
+  p_L = numeric(),
+  p_I = numeric(),
+  cor = numeric(),
+  
+  # Sample sizes (mean only)
+  n_I0_mean = numeric(),
+  n_I1_mean = numeric(),
+  
+  # Severity (mean only)
+  severity_I0_mean = numeric(),
+  severity_I1_mean = numeric(),
+  
+  # Shannon: mean, SD for groups; mean, CI for delta
+  shannon_I0_mean = numeric(),
+  shannon_I0_sd = numeric(),
+  shannon_I1_mean = numeric(),
+  shannon_I1_sd = numeric(),
+  delta_shannon_mean = numeric(),
+  delta_shannon_ci_lower = numeric(),
+  delta_shannon_ci_upper = numeric(),
+  
+  # Hill q=0: mean, SD for groups; mean, CI for delta
+  hill_q0_I0_mean = numeric(),
+  hill_q0_I0_sd = numeric(),
+  hill_q0_I1_mean = numeric(),
+  hill_q0_I1_sd = numeric(),
+  delta_hill_q0_mean = numeric(),
+  delta_hill_q0_ci_lower = numeric(),
+  delta_hill_q0_ci_upper = numeric(),
+  
+  # Hill q=1: mean, SD for groups; mean, CI for delta
+  hill_q1_I0_mean = numeric(),
+  hill_q1_I0_sd = numeric(),
+  hill_q1_I1_mean = numeric(),
+  hill_q1_I1_sd = numeric(),
+  delta_hill_q1_mean = numeric(),
+  delta_hill_q1_ci_lower = numeric(),
+  delta_hill_q1_ci_upper = numeric(),
+  
+  # Hill q=2: mean, SD for groups; mean, CI for delta
+  hill_q2_I0_mean = numeric(),
+  hill_q2_I0_sd = numeric(),
+  hill_q2_I1_mean = numeric(),
+  hill_q2_I1_sd = numeric(),
+  delta_hill_q2_mean = numeric(),
+  delta_hill_q2_ci_lower = numeric(),
+  delta_hill_q2_ci_upper = numeric(),
+  
+  stringsAsFactors = FALSE
+)
+```
+
+## Running Simulations
+
+```{r simulations, echo=TRUE}
+# Loop through each parameter combination
+for(param_idx in 1:nrow(parameter_grid)) {
+  
+  # Extract current parameter values
+  current_p_L <- parameter_grid$p_L[param_idx]
+  current_p_I <- parameter_grid$p_I[param_idx]
+  current_cor <- parameter_grid$cor[param_idx]
+  
+  # Progress indicator
+  cat("\n=== Processing scenario", param_idx, "of", nrow(parameter_grid), "===\n")
+  cat("p(L) =", current_p_L, ", p(I) =", current_p_I, ", cor =", current_cor, "\n")
+  
+  # Vectors to store results for this scenario
+  n_I0_vec <- numeric(n_sims)
+  n_I1_vec <- numeric(n_sims)
+  severity_I0_vec <- numeric(n_sims)
+  severity_I1_vec <- numeric(n_sims)
+  shannon_I0_vec <- numeric(n_sims)
+  shannon_I1_vec <- numeric(n_sims)
+  hill_q0_I0_vec <- numeric(n_sims)
+  hill_q0_I1_vec <- numeric(n_sims)
+  hill_q1_I0_vec <- numeric(n_sims)
+  hill_q1_I1_vec <- numeric(n_sims)
+  hill_q2_I0_vec <- numeric(n_sims)
+  hill_q2_I1_vec <- numeric(n_sims)
+  
+  # Run simulations for this scenario
+  for(sim in 1:n_sims) {
+    
+    # Generate correlated binary latent variables
+    latent_vars <- generate_correlated_binary(n, p1 = current_p_L, p2 = current_p_I, cor = current_cor)
+    L <- latent_vars$L
+    I <- latent_vars$I
+    
+    # Simulate symptoms with additive model (fixed coefficients)
+    S1 <- rescale(2.0 * L + 0.6 * I + rnorm(n, mean=2, sd=0.5))
+    S2 <- rescale(1.8 * L + 0.5 * I + rnorm(n, mean=2, sd=0.5))
+    M  <- rescale(1.2 * L + 0.7 * I + rnorm(n, mean=2, sd=0.8))
+    W1 <- rescale(0.6 * L + 0.5 * I + rnorm(n, mean=2, sd=1))
+    W2 <- rescale(0.4 * L + 0.3 * I + rnorm(n, mean=2, sd=1))
+    
+    # Combine into data frame
+    data <- data.frame(L, I, S1, S2, W1, W2, M)
+    
+    # Create binary symptom indicators
+    data <- data %>%
+      mutate(
+        S1_positive = S1 >= 2,
+        S2_positive = S2 >= 2,
+        W1_positive = W1 >= 2,
+        W2_positive = W2 >= 2,
+        M_positive = M >= 2
+      )
+    
+    # Count criteria met
+    data <- data %>%
+      mutate(criteria_met = S1_positive + S2_positive + W1_positive + W2_positive + M_positive)
+    
+    # Filter to diagnosed individuals (≥2 criteria)
+    filtered_data <- data %>% filter(criteria_met >= 2)
+    
+    # Calculate symptom severity
+    filtered_data <- filtered_data %>%
+      mutate(severity = S1 + S2 + M + W1 + W2)
+    
+    # Split by inflammation status
+    filtered_WITH_I <- filtered_data %>% filter(I == 1)
+    filtered_WITHOUT_I <- filtered_data %>% filter(I == 0)
+    
+    # Skip if either group is too small
+    if(nrow(filtered_WITH_I) < 10 || nrow(filtered_WITHOUT_I) < 10) {
+      next
+    }
+    
+    # === Severity-based sampling for equal groups ===
+    mean_severity_WITH <- mean(filtered_WITH_I$severity)
+    sd_severity_WITH <- sd(filtered_WITH_I$severity)
+    
+    lower_bound <- mean_severity_WITH - 0.5 * sd_severity_WITH
+    upper_bound <- mean_severity_WITH + 0.5 * sd_severity_WITH
+    
+    filtered_WITHOUT_I_eligible <- filtered_WITHOUT_I %>%
+      filter(severity >= lower_bound & severity <= upper_bound)
+    
+    n_sample <- min(nrow(filtered_WITH_I), nrow(filtered_WITHOUT_I_eligible))
+    
+    if(n_sample > 5) {
+      filtered_WITH_I <- filtered_WITH_I %>% sample_n(n_sample)
+      filtered_WITHOUT_I <- filtered_WITHOUT_I_eligible %>% sample_n(n_sample)
+    } else {
+      next
+    }
+    
+    # Track sample sizes and severity
+    n_I1_vec[sim] <- nrow(filtered_WITH_I)
+    n_I0_vec[sim] <- nrow(filtered_WITHOUT_I)
+    severity_I1_vec[sim] <- mean(filtered_WITH_I$severity)
+    severity_I0_vec[sim] <- mean(filtered_WITHOUT_I$severity)
+    
+    # Create combination strings
+    filtered_WITH_I <- filtered_WITH_I %>%
+      mutate(combination = paste0(as.integer(S1_positive),
+                                   as.integer(S2_positive),
+                                   as.integer(W1_positive),
+                                   as.integer(W2_positive),
+                                   as.integer(M_positive)))
+    
+    filtered_WITHOUT_I <- filtered_WITHOUT_I %>%
+      mutate(combination = paste0(as.integer(S1_positive),
+                                   as.integer(S2_positive),
+                                   as.integer(W1_positive),
+                                   as.integer(W2_positive),
+                                   as.integer(M_positive)))
+    
+    # Count combinations and calculate proportions
+    counts_WITH <- filtered_WITH_I %>%
+      count(combination) %>%
+      mutate(proportion = n / sum(n))
+    
+    counts_WITHOUT <- filtered_WITHOUT_I %>%
+      count(combination) %>%
+      mutate(proportion = n / sum(n))
+    
+    # Calculate heterogeneity indices for WITH inflammation (I=1)
+    if(nrow(counts_WITH) > 0) {
+      shannon_I1_vec[sim] <- calculate_shannon(counts_WITH$proportion)
+      hill_q0_I1_vec[sim] <- calculate_hill(counts_WITH$proportion, q = 0)
+      hill_q1_I1_vec[sim] <- calculate_hill(counts_WITH$proportion, q = 1)
+      hill_q2_I1_vec[sim] <- calculate_hill(counts_WITH$proportion, q = 2)
+    }
+    
+    # Calculate heterogeneity indices for WITHOUT inflammation (I=0)
+    if(nrow(counts_WITHOUT) > 0) {
+      shannon_I0_vec[sim] <- calculate_shannon(counts_WITHOUT$proportion)
+      hill_q0_I0_vec[sim] <- calculate_hill(counts_WITHOUT$proportion, q = 0)
+      hill_q1_I0_vec[sim] <- calculate_hill(counts_WITHOUT$proportion, q = 1)
+      hill_q2_I0_vec[sim] <- calculate_hill(counts_WITHOUT$proportion, q = 2)
+    }
+  }
+  
+  # Remove zero/NA values (failed simulations)
+  valid_idx <- n_I1_vec > 0 & n_I0_vec > 0
+  
+  if(sum(valid_idx) < 10) {
+    cat("WARNING: Too few valid simulations for this scenario!\n")
+    next
+  }
+  
+  # Filter to valid simulations
+  n_I0_vec <- n_I0_vec[valid_idx]
+  n_I1_vec <- n_I1_vec[valid_idx]
+  severity_I0_vec <- severity_I0_vec[valid_idx]
+  severity_I1_vec <- severity_I1_vec[valid_idx]
+  shannon_I0_vec <- shannon_I0_vec[valid_idx]
+  shannon_I1_vec <- shannon_I1_vec[valid_idx]
+  hill_q0_I0_vec <- hill_q0_I0_vec[valid_idx]
+  hill_q0_I1_vec <- hill_q0_I1_vec[valid_idx]
+  hill_q1_I0_vec <- hill_q1_I0_vec[valid_idx]
+  hill_q1_I1_vec <- hill_q1_I1_vec[valid_idx]
+  hill_q2_I0_vec <- hill_q2_I0_vec[valid_idx]
+  hill_q2_I1_vec <- hill_q2_I1_vec[valid_idx]
+  
+  cat("Valid simulations:", sum(valid_idx), "\n")
+  
+  # Calculate deltas
+  delta_shannon <- shannon_I1_vec - shannon_I0_vec
+  delta_hill_q0 <- hill_q0_I1_vec - hill_q0_I0_vec
+  delta_hill_q1 <- hill_q1_I1_vec - hill_q1_I0_vec
+  delta_hill_q2 <- hill_q2_I1_vec - hill_q2_I0_vec
+  
+  # Helper function to calculate 95% CI
+  calc_ci <- function(x) {
+    m <- mean(x)
+    se <- sd(x) / sqrt(length(x))
+    return(c(lower = m - 1.96 * se, upper = m + 1.96 * se))
+  }
+  
+  # Calculate CIs for deltas
+  ci_shannon <- calc_ci(delta_shannon)
+  ci_hill_q0 <- calc_ci(delta_hill_q0)
+  ci_hill_q1 <- calc_ci(delta_hill_q1)
+  ci_hill_q2 <- calc_ci(delta_hill_q2)
+  
+  # Add row to results with RAW NUMERIC values
+  results_block1 <- rbind(results_block1, data.frame(
+    # Parameters
+    p_L = current_p_L,
+    p_I = current_p_I,
+    cor = current_cor,
+    
+    # Sample sizes (mean only)
+    n_I0_mean = mean(n_I0_vec),
+    n_I1_mean = mean(n_I1_vec),
+    
+    # Severity (mean only)
+    severity_I0_mean = mean(severity_I0_vec),
+    severity_I1_mean = mean(severity_I1_vec),
+    
+    # Shannon
+    shannon_I0_mean = mean(shannon_I0_vec),
+    shannon_I0_sd = sd(shannon_I0_vec),
+    shannon_I1_mean = mean(shannon_I1_vec),
+    shannon_I1_sd = sd(shannon_I1_vec),
+    delta_shannon_mean = mean(delta_shannon),
+    delta_shannon_ci_lower = ci_shannon["lower"],
+    delta_shannon_ci_upper = ci_shannon["upper"],
+    
+    # Hill q=0
+    hill_q0_I0_mean = mean(hill_q0_I0_vec),
+    hill_q0_I0_sd = sd(hill_q0_I0_vec),
+    hill_q0_I1_mean = mean(hill_q0_I1_vec),
+    hill_q0_I1_sd = sd(hill_q0_I1_vec),
+    delta_hill_q0_mean = mean(delta_hill_q0),
+    delta_hill_q0_ci_lower = ci_hill_q0["lower"],
+    delta_hill_q0_ci_upper = ci_hill_q0["upper"],
+    
+    # Hill q=1
+    hill_q1_I0_mean = mean(hill_q1_I0_vec),
+    hill_q1_I0_sd = sd(hill_q1_I0_vec),
+    hill_q1_I1_mean = mean(hill_q1_I1_vec),
+    hill_q1_I1_sd = sd(hill_q1_I1_vec),
+    delta_hill_q1_mean = mean(delta_hill_q1),
+    delta_hill_q1_ci_lower = ci_hill_q1["lower"],
+    delta_hill_q1_ci_upper = ci_hill_q1["upper"],
+    
+    # Hill q=2
+    hill_q2_I0_mean = mean(hill_q2_I0_vec),
+    hill_q2_I0_sd = sd(hill_q2_I0_vec),
+    hill_q2_I1_mean = mean(hill_q2_I1_vec),
+    hill_q2_I1_sd = sd(hill_q2_I1_vec),
+    delta_hill_q2_mean = mean(delta_hill_q2),
+    delta_hill_q2_ci_lower = ci_hill_q2["lower"],
+    delta_hill_q2_ci_upper = ci_hill_q2["upper"],
+    
+    stringsAsFactors = FALSE
+  ))
+}
+
+cat("\n\n=== ALL SCENARIOS COMPLETED ===\n")
+```
+
+## Export Raw Results to CSV
+
+```{r export_csv, echo=TRUE}
+# Save raw numeric results to CSV (for archiving and potential re-analysis)
+write.csv(results_block1, "Additive_Block1_Results_Raw.csv", row.names = FALSE)
+cat("Raw results saved to 'Additive_Block1_Results_Raw.csv'\n")
+```
+
+## Create Publication-Ready Tables
+
+```{r create_tables, echo=TRUE}
+# =============================================================================
+# MAIN MANUSCRIPT TABLE
+# Shows: p(L), p(I), c, Δ Shannon [95% CI], Δ Hill q=1 [95% CI]
+# =============================================================================
+
+main_table_df <- results_block1 %>%
+  transmute(
+    `p(L)` = p_L,
+    `p(I)` = p_I,
+    `c` = cor,
+    `Δ Shannon [95% CI]` = sprintf("%.2f [%.2f, %.2f]", 
+                                    delta_shannon_mean, 
+                                    delta_shannon_ci_lower, 
+                                    delta_shannon_ci_upper),
+    `Δ Hill q=1 [95% CI]` = sprintf("%.2f [%.2f, %.2f]", 
+                                     delta_hill_q1_mean, 
+                                     delta_hill_q1_ci_lower, 
+                                     delta_hill_q1_ci_upper)
+  )
+
+# Create flextable for main manuscript
+ft_main <- flextable(main_table_df) %>%
+  theme_booktabs() %>%
+  autofit() %>%
+  align(align = "center", part = "all") %>%
+  bold(part = "header") %>%
+  fontsize(size = 10, part = "all") %>%
+  padding(padding = 4, part = "all") %>%
+  set_caption("Additive Model - Block 1")
+
+# Display main table
+ft_main
+```
+
+```{r create_supplementary_table, echo=TRUE}
+# =============================================================================
+# SUPPLEMENTARY TABLE
+# Shows all columns with:
+# - Mean only for sample size and severity
+# - Mean ± SD for Shannon and Hill values
+# - Mean [95% CI] for deltas
+# =============================================================================
+
+supp_table_df <- results_block1 %>%
+  transmute(
+    `p(L)` = p_L,
+    `p(I)` = p_I,
+    `c` = cor,
+    
+    # Shannon (mean ± SD for groups, mean [95% CI] for delta)
+    `Shannon (I=0)` = sprintf("%.2f ± %.2f", shannon_I0_mean, shannon_I0_sd),
+    `Shannon (I=1)` = sprintf("%.2f ± %.2f", shannon_I1_mean, shannon_I1_sd),
+    `Δ Shannon` = sprintf("%.2f [%.2f, %.2f]", 
+                          delta_shannon_mean, 
+                          delta_shannon_ci_lower, 
+                          delta_shannon_ci_upper),
+    
+    # Hill q=0 (mean ± SD for groups, mean [95% CI] for delta)
+    `Hill q=0 (I=0)` = sprintf("%.2f ± %.2f", hill_q0_I0_mean, hill_q0_I0_sd),
+    `Hill q=0 (I=1)` = sprintf("%.2f ± %.2f", hill_q0_I1_mean, hill_q0_I1_sd),
+    `Δ Hill q=0` = sprintf("%.2f [%.2f, %.2f]", 
+                           delta_hill_q0_mean, 
+                           delta_hill_q0_ci_lower, 
+                           delta_hill_q0_ci_upper),
+    
+    # Hill q=1 (mean ± SD for groups, mean [95% CI] for delta)
+    `Hill q=1 (I=0)` = sprintf("%.2f ± %.2f", hill_q1_I0_mean, hill_q1_I0_sd),
+    `Hill q=1 (I=1)` = sprintf("%.2f ± %.2f", hill_q1_I1_mean, hill_q1_I1_sd),
+    `Δ Hill q=1` = sprintf("%.2f [%.2f, %.2f]", 
+                           delta_hill_q1_mean, 
+                           delta_hill_q1_ci_lower, 
+                           delta_hill_q1_ci_upper),
+    
+    # Hill q=2 (mean ± SD for groups, mean [95% CI] for delta)
+    `Hill q=2 (I=0)` = sprintf("%.2f ± %.2f", hill_q2_I0_mean, hill_q2_I0_sd),
+    `Hill q=2 (I=1)` = sprintf("%.2f ± %.2f", hill_q2_I1_mean, hill_q2_I1_sd),
+    `Δ Hill q=2` = sprintf("%.2f [%.2f, %.2f]", 
+                           delta_hill_q2_mean, 
+                           delta_hill_q2_ci_lower, 
+                           delta_hill_q2_ci_upper)
+  )
+
+# Create flextable for supplementary material
+ft_supp <- flextable(supp_table_df) %>%
+  theme_booktabs() %>%
+  fontsize(size = 7, part = "all") %>%
+  align(align = "center", part = "all") %>%
+  bold(part = "header") %>%
+  padding(padding = 2, part = "all") %>%
+  autofit() %>%
+  set_caption("Supplementary Table: Additive Model - Block 1: Detailed Heterogeneity Results")
+
+# Display supplementary table
+ft_supp
+```
+
+## Export Tables to Word
+
+```{r export_tables, echo=TRUE}
+# Export main manuscript table
+doc_main <- read_docx() %>%
+  body_add_par("Table X. Additive Model - Block 1: Sensitivity Analysis", style = "heading 1") %>%
+  body_add_par("") %>%
+  body_add_flextable(ft_main) %>%
+  body_add_par("") %>%
+  body_add_par("Note: Δ = difference between groups (I=1 minus I=0). Values represent mean [95% CI] across 1000 simulations.", style = "Normal")
+
+print(doc_main, target = "Table_Additive_Block1_Main.docx")
+cat("Main table saved to 'Table_Additive_Block1_Main.docx'\n")
+
+# Export supplementary table
+doc_supp <- read_docx() %>%
+  body_add_par("Supplementary Table X. Additive Model - Block 1: Detailed Results", style = "heading 1") %>%
+  body_add_par("") %>%
+  body_add_flextable(ft_supp) %>%
+  body_add_par("") %>%
+  body_add_par("Note: Group values shown as mean ± SD. Δ values shown as mean [95% CI]. All statistics calculated across 1000 simulations.", style = "Normal")
+
+print(doc_supp, target = "Table_Additive_Block1_Supplementary.docx")
+cat("Supplementary table saved to 'Table_Additive_Block1_Supplementary.docx'\n")
+```

@@ -530,4 +530,5 @@ ggplot(filtered_probs_combined, aes(x = reorder(Combination, -Mean_Probability),
        y = "Probability",
        fill = "") + 
   Theme_Figure_1a
+ggsave("Figure_2a_Additive_Model.png", width = 10, height = 6, dpi = 300)
 ```
